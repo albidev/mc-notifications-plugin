@@ -1085,6 +1085,26 @@ def list_notifications(
         conn.close()
 
 
+def notification_status() -> Dict[str, Any]:
+    all_notifications = list_notifications(limit=1)
+    actionable = list_notifications(limit=1, actionable_only=True)
+    unread_count = int(all_notifications["unreadCount"])
+    actionable_count = int(actionable["unreadCount"])
+    if actionable_count:
+        tone = "warning"
+    elif unread_count:
+        tone = "info"
+    else:
+        tone = "neutral"
+    return {
+        "active": unread_count > 0,
+        "count": unread_count,
+        "actionableCount": actionable_count,
+        "tone": tone,
+        "label": f"{unread_count} unread notification{'s' if unread_count != 1 else ''}",
+    }
+
+
 def mark_notification_read(notification_id: str) -> Optional[Dict[str, Any]]:
     conn = _connect()
     try:

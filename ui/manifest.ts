@@ -7,13 +7,24 @@ export const notificationsManifest: MCPluginManifest = {
   version: '0.2.0',
   enabled: true,
   routePath: '/notifications',
-  navItem: { to: '/notifications', label: 'Notifications', icon: 'Bell', order: 55 },
+  navItem: {
+    to: '/notifications',
+    label: 'Notifications',
+    icon: 'Bell',
+    order: 55,
+    indicator: {
+      endpoint: '/notifications/status',
+      pollMs: 30_000,
+      tones: ['neutral', 'info', 'success', 'warning', 'error'],
+    },
+  },
   surfaces: {
     overview: { enabled: true, order: 20, className: 'widget-notifications' },
     attention: { enabled: true, order: 20 },
   },
   endpoints: [
     { method: 'GET', path: '/notifications', handler: 'listNotifications' },
+    { method: 'GET', path: '/notifications/status', handler: 'notificationStatus' },
     { method: 'POST', path: '/notifications/publish', handler: 'publishNotification' },
     { method: 'POST', path: '/notifications/read', handler: 'markNotificationRead' },
     { method: 'POST', path: '/notifications/read-all', handler: 'markAllNotificationsRead' },

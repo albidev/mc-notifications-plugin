@@ -9,7 +9,12 @@
     "to": "/notifications",
     "label": "Notifications",
     "icon": "Bell",
-    "order": 55
+    "order": 55,
+    "indicator": {
+      "endpoint": "/notifications/status",
+      "pollMs": 30000,
+      "tones": ["neutral", "info", "success", "warning", "error"]
+    }
   },
   "surfaces": {
     "overview": {
@@ -27,6 +32,12 @@
       "method": "GET",
       "path": "/notifications",
       "handler": "listNotifications",
+      "authRequired": true
+    },
+    {
+      "method": "GET",
+      "path": "/notifications/status",
+      "handler": "notificationStatus",
       "authRequired": true
     },
     {

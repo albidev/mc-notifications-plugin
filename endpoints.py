@@ -44,6 +44,11 @@ def listNotifications(body: Dict[str, Any], params: Dict[str, List[str]], auth: 
         raise PluginError(400, "bad_request", str(exc)) from exc
 
 
+def notificationStatus(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    handlers.start_cron_watcher()
+    return handlers.notification_status()
+
+
 def publishNotification(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
     handlers.start_cron_watcher()
     try:

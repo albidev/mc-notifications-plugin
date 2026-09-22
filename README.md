@@ -19,7 +19,8 @@ Persistent notification inbox for Mission Control.
 - delivery lifecycle with SQLite-backed channel attempts (`pending`, `retrying`, `delivered`, `failed`), atomic claims, exponential backoff, and a configurable maximum attempt count (`MISSION_CONTROL_NOTIFICATIONS_MAX_ATTEMPTS`, default `5`);
 - Web Push channel adapter: recent notifications are queued to the host's VAPID subscription registry and delivered by the plugin-owned retry worker; historical backfill is never pushed;
 - action-needed filtering: `error`, `warning`, `action`, or payloads with `actionRequired: true` surface in Attention Needed and the Inbox `Action needed` filter;
-- deep links are restricted to internal paths and are carried into Web Push click payloads.
+- deep links are restricted to internal paths and are carried into Web Push click payloads;
+- generic Mission Control sidebar indicator: the plugin exposes `/notifications/status`, while MC renders the agnostic dot without knowing notification semantics.
 
 ## Installation
 
