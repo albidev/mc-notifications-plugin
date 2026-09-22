@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+notifications.db
+notifications.db-shm
+notifications.db-wal
+.DS_Store

@@ -1,0 +1,27 @@
+{
+  "defaults": {
+    "mode": "silent",
+    "on": ["failed"]
+  },
+  "jobs": {
+    "crossnection-delivery-morning": {"mode": "report", "on": ["completed", "failed"]},
+    "crossnection-delivery-evening": {"mode": "report", "on": ["completed", "failed"]},
+    "signal-news": {"mode": "report", "on": ["completed", "failed"]},
+    "signal-trends": {"mode": "report", "on": ["completed", "failed"]},
+    "signal-video": {"mode": "report", "on": ["completed", "failed"]},
+    "bdh-nightly-consolidation": {"mode": "report", "on": ["completed", "failed"]},
+    "bdh-hebbian-eval-verdict": {"mode": "report", "on": ["completed", "failed"]},
+    "curate-golden-set-recap": {"mode": "report", "on": ["completed", "failed"]},
+    "curate-nightly-verify": {"mode": "report", "on": ["completed", "failed"]},
+    "curate-curator-review": {"mode": "report", "on": ["completed", "failed"]},
+    "state-db-integrity-check": {"mode": "event", "on": ["failed", "recovered"]},
+    "bdh-brain-promote": {"mode": "event", "on": ["failed", "changed"]},
+    "bdh-okf-live-watchdog": {"mode": "event", "on": ["failed", "recovered"]},
+    "bdh-recovery-watchdog": {"mode": "event", "on": ["failed", "recovered"]},
+    "omlx-watchdog": {"mode": "event", "on": ["failed", "recovered"]},
+    "BDH session synthesis workstream monitor": {"mode": "event", "on": ["failed", "changed"]},
+    "vault-sync": {"mode": "event", "on": ["failed", "changed"]},
+    "crossnection-nightly-brain": {"mode": "event", "on": ["failed", "changed"]},
+    "curate-golden-set-drain": {"mode": "event", "on": ["failed", "changed"]}
+  }
+}
