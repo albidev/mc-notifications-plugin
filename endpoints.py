@@ -15,6 +15,7 @@ class PluginError(Exception):
 
 
 def listNotifications(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    handlers.start_cron_watcher()
     try:
         limit = min(max(int((params.get("limit") or ["50"])[0]), 1), 100)
         offset = max(int((params.get("offset") or ["0"])[0]), 0)

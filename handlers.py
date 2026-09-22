@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
+import threading
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -24,7 +27,14 @@ _DB_PATH = Path(os.environ.get("MISSION_CONTROL_NOTIFICATIONS_DB", str(_DEFAULT_
 _ALLOWED_SEVERITIES = {"info", "success", "warning", "error", "action"}
 _MAX_TEXT = 4000
 _MAX_BODY = 200_000
+_DEFAULT_RETENTION_DAYS = 90
+_CRON_WATCH_INTERVAL_SECONDS = 2.0
+_CRON_SYNC_LOCK = threading.Lock()
+_CRON_WATCH_LOCK = threading.Lock()
+_CRON_WATCH_STARTED = False
+_CRON_FINGERPRINT: Optional[tuple[Any, ...]] = None
 _REPORT_NAME_RE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}-\d{2})\.md$")
+_LOG = logging.getLogger(__name__)
 
 
 def _hermes_root() -> Path:
@@ -142,10 +152,16 @@ def _event_notification(
     body: str,
     report_time: datetime,
     previous_body: Optional[str],
+    current_status_override: Optional[str] = None,
+    execution_error_override: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     job_id = str(job.get("id") or "").strip()
     job_name = str(job.get("name") or job_id).strip()
     current_status, previous_status, execution_error = _execution_status_context(cron_root, job_id, report_time)
+    if current_status_override:
+        current_status = current_status_override
+    if execution_error_override:
+        execution_error = execution_error_override
     current_comparable = comparable_event_body(body)
     previous_comparable = comparable_event_body(previous_body) if previous_body is not None else None
     output_changed = previous_body is not None and bool(current_comparable) and previous_comparable != current_comparable
@@ -270,6 +286,202 @@ def _sync_cron_delivery_reports() -> None:
         publish_notification(report, created_at=report.pop("_createdAt", None))
 
 
+def _cron_output_fingerprint() -> tuple[Any, ...]:
+    entries: list[tuple[Any, ...]] = []
+    for profile, cron_root in _profile_cron_roots():
+        output_root = cron_root / "output"
+        if not output_root.is_dir():
+            continue
+        try:
+            output_files = sorted(output_root.rglob("*.md"))
+        except OSError:
+            continue
+        for path in output_files:
+            try:
+                stat = path.stat()
+                relative = str(path.relative_to(cron_root))
+            except (OSError, ValueError):
+                continue
+            entries.append((profile, relative, stat.st_mtime_ns, stat.st_size))
+    return tuple(entries)
+
+
+def _sync_cron_if_changed() -> bool:
+    global _CRON_FINGERPRINT
+    fingerprint = _cron_output_fingerprint()
+    with _CRON_SYNC_LOCK:
+        if fingerprint == _CRON_FINGERPRINT:
+            return False
+        try:
+            _sync_cron_delivery_reports()
+        except Exception:
+            _LOG.exception("Failed to synchronize cron reports")
+            return False
+        _CRON_FINGERPRINT = fingerprint
+        return True
+
+
+def _cron_watcher_loop() -> None:
+    while True:
+        try:
+            _drain_cron_notification_outbox()
+            _sync_cron_if_changed()
+        except Exception:
+            _LOG.exception("Cron notification watcher iteration failed")
+        time.sleep(_CRON_WATCH_INTERVAL_SECONDS)
+
+
+def start_cron_watcher() -> None:
+    """Start the plugin-owned cron producer once, after the first MC API request."""
+    global _CRON_WATCH_STARTED
+    with _CRON_WATCH_LOCK:
+        if _CRON_WATCH_STARTED:
+            return
+        _CRON_WATCH_STARTED = True
+        threading.Thread(
+            target=_cron_watcher_loop,
+            name="mc-notifications-cron-watcher",
+            daemon=True,
+        ).start()
+
+
+def _safe_outbox_output_file(cron_root: Path, raw_path: Any) -> Optional[Path]:
+    if not raw_path:
+        return None
+    candidate = Path(str(raw_path)).expanduser()
+    try:
+        candidate.resolve().relative_to(cron_root.resolve())
+    except ValueError:
+        _LOG.warning("Ignoring cron notification output outside profile root: %s", candidate)
+        return None
+    return candidate
+
+
+def _outbox_report_time(event: Dict[str, Any], output_file: Optional[Path]) -> datetime:
+    if output_file is not None and output_file.exists():
+        return _parse_report_time(output_file)
+    try:
+        return datetime.fromisoformat(str(event.get("createdAt"))).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc)
+
+
+def _previous_output_body(output_file: Optional[Path]) -> Optional[str]:
+    if output_file is None or not output_file.parent.is_dir():
+        return None
+    files = sorted(output_file.parent.glob("*.md"))
+    try:
+        index = files.index(output_file)
+    except ValueError:
+        return _archive_response(files[-1].read_text(encoding="utf-8", errors="replace").strip()) if files else None
+    if index <= 0:
+        return None
+    try:
+        return _archive_response(files[index - 1].read_text(encoding="utf-8", errors="replace").strip())
+    except OSError:
+        return None
+
+
+def _outbox_notification(
+    *,
+    profile: str,
+    cron_root: Path,
+    event: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    raw_job = event.get("job")
+    job: Dict[str, Any] = dict(raw_job) if isinstance(raw_job, dict) else {}
+    job_id = str(job.get("id") or "").strip()
+    job_name = str(job.get("name") or job_id).strip()
+    event_id = str(event.get("eventId") or "").strip()
+    if not job_id or not event_id:
+        _LOG.warning("Ignoring malformed cron notification event: missing job id or event id")
+        return None
+
+    output_file = _safe_outbox_output_file(cron_root, event.get("outputFile"))
+    body = None
+    if output_file is not None:
+        try:
+            archive = output_file.read_text(encoding="utf-8", errors="replace").strip()
+            body = _archive_response(archive)
+        except OSError:
+            body = None
+    error = str(event.get("error") or "").strip() or None
+    status = str(event.get("status") or "completed").strip().lower()
+    current_status = "failed" if status in {"failed", "failure", "error"} else "completed"
+    report_time = _outbox_report_time(event, output_file)
+    body = body or error
+    if not body and current_status == "failed":
+        body = "Cron job failed without a saved response."
+    if not body and current_status == "completed":
+        body = "Cron job completed without a saved response."
+    if not body:
+        return None
+
+    routing = classify_job(job, policy)
+    if routing["mode"] == "report":
+        severity = "error" if current_status == "failed" else "success"
+        dedupe_suffix = output_file.name if output_file is not None else event_id
+        return {
+            "dedupeKey": f"cron:{profile}:{job_id}:delivery:{dedupe_suffix}",
+            "type": "cron.delivery",
+            "severity": severity,
+            "title": f"{job_name} · report",
+            "body": body,
+            "source": {"kind": "cron", "id": job_id},
+            "profile": profile,
+            "deepLink": f"/cron?job={job_id}&profile={profile}",
+            "payload": {
+                "kind": "cron-report",
+                "jobId": job_id,
+                "jobName": job_name,
+                "outputFile": str(output_file) if output_file else None,
+                "schedule": job.get("schedule_display") or job.get("schedule"),
+                "executionError": error,
+                "executionId": event_id,
+            },
+            "_createdAt": report_time.isoformat(),
+        }
+
+    event_output = output_file or cron_root / "notification-outbox" / f"{event_id}.md"
+    notification = _event_notification(
+        profile=profile,
+        cron_root=cron_root,
+        job=job,
+        policy=policy,
+        output_file=event_output,
+        body=body,
+        report_time=report_time,
+        previous_body=_previous_output_body(output_file),
+        current_status_override=current_status,
+        execution_error_override=error,
+    )
+    if notification:
+        notification["payload"]["executionId"] = event_id
+    return notification
+
+
+def _drain_cron_notification_outbox() -> None:
+    """Consume scheduler events; leave unreadable events for operator inspection/retry."""
+    policy = load_policy()
+    for profile, cron_root in _profile_cron_roots():
+        outbox = cron_root / "notification-outbox"
+        if not outbox.is_dir():
+            continue
+        for event_path in sorted(outbox.glob("*.json")):
+            try:
+                event = json.loads(event_path.read_text(encoding="utf-8"))
+                if not isinstance(event, dict) or event.get("schema") != 1:
+                    raise ValueError("unsupported event schema")
+                notification = _outbox_notification(
+                    profile=profile, cron_root=cron_root, event=event, policy=policy)
+                if notification:
+                    publish_notification(notification, created_at=notification.pop("_createdAt", None))
+                event_path.unlink()
+            except (OSError, ValueError, TypeError, NotificationValidationError):
+                _LOG.exception("Failed to consume cron notification event %s", event_path)
+
+
 class NotificationValidationError(ValueError):
     pass
 
@@ -312,6 +524,40 @@ def _connect() -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def _configured_retention_days() -> Optional[int]:
+    raw = os.environ.get("MISSION_CONTROL_NOTIFICATIONS_RETENTION_DAYS")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_RETENTION_DAYS
+    try:
+        days = int(str(raw).strip())
+    except ValueError:
+        _LOG.warning("Invalid notification retention value %r; using %s days", raw, _DEFAULT_RETENTION_DAYS)
+        return _DEFAULT_RETENTION_DAYS
+    return days if days > 0 else None
+
+
+def prune_notifications(*, retention_days: Optional[int] = None) -> int:
+    """Delete archived or old read notifications; unread items are retained."""
+    days = _configured_retention_days() if retention_days is None else retention_days
+    if days is None or days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    conn = _connect()
+    try:
+        cursor = conn.execute(
+            """
+            DELETE FROM notifications
+            WHERE archived_at IS NOT NULL
+               OR (read_at IS NOT NULL AND created_at < ?)
+            """,
+            (cutoff,),
+        )
+        conn.commit()
+        return int(cursor.rowcount)
+    finally:
+        conn.close()
 
 
 def _row(row: sqlite3.Row) -> Dict[str, Any]:
@@ -437,7 +683,9 @@ def list_notifications(
     search: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> Dict[str, Any]:
-    _sync_cron_delivery_reports()
+    _drain_cron_notification_outbox()
+    _sync_cron_if_changed()
+    prune_notifications()
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
     read_filter = str(read_filter or "").strip().lower() or None

@@ -12,7 +12,10 @@ Persistent notification inbox for Mission Control.
 - cron routing policy in `notification-policy.json` with `report`, `event`, and `silent` modes;
 - report mode imports every historical response, event mode imports only configured failures/recoveries/changes, and silent mode only surfaces failures;
 - generic publish endpoint ready for non-cron producers;
-- paginated inbox loading with server-side search and read/unread filtering.
+- paginated inbox loading with server-side search and read/unread filtering;
+- durable cron completion outbox consumer: sanitized events are drained idempotently when available, while the legacy `.md` importer remains as a compatibility path for cron runs that do not emit outbox events;
+- plugin-owned live watcher: after the first inbox request it tracks output-file fingerprints and imports changed cron reports in a daemon worker, without modifying Hermes core;
+- retention pruning with a 90-day default: archived and old read notifications are removed while unread notifications are preserved (`MISSION_CONTROL_NOTIFICATIONS_RETENTION_DAYS=0` disables it).
 
 ## Installation
 
