@@ -21,12 +21,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export type NotificationListOptions = {
   read?: 'read' | 'unread';
   search?: string;
+  actionable?: boolean;
 };
 
 export function listNotifications(limit = 50, offset = 0, options: NotificationListOptions = {}): Promise<NotificationList> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (options.read) params.set('read', options.read);
   if (options.search?.trim()) params.set('q', options.search.trim());
+  if (options.actionable) params.set('actionable', '1');
   return request<NotificationList>(`/notifications?${params.toString()}`);
 }
 

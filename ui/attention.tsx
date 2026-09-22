@@ -8,7 +8,7 @@ export function NotificationsAttention({ onActiveChange }: { onActiveChange: (co
   const [count, setCount] = useState(0);
   const refresh = useCallback(async () => {
     try {
-      const result = await listNotifications(1);
+      const result = await listNotifications(1, 0, { actionable: true });
       setCount(result.unreadCount);
       onActiveChange(result.unreadCount);
     } catch {
@@ -28,8 +28,8 @@ export function NotificationsAttention({ onActiveChange }: { onActiveChange: (co
     <div className="flex items-center gap-2">
       <Bell className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-text">Unread notifications</p>
-        <p className="mt-0.5 text-xs text-text-muted">The inbox has items waiting for review.</p>
+        <p className="truncate text-sm font-medium text-text">Action needed</p>
+        <p className="mt-0.5 text-xs text-text-muted">Errors, warnings, and notifications waiting for your input.</p>
       </div>
       <Badge variant="warning">{count}</Badge>
       <Link to="/notifications" className="text-text-muted hover:text-accent" aria-label="Open notifications" title="Open notifications">

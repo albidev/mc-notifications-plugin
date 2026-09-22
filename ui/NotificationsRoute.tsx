@@ -25,6 +25,10 @@ function isCronEvent(item: NotificationItem): boolean {
   return item.payload?.kind === 'cron-event' || item.type === 'cron.event';
 }
 
+function isActionRequired(item: NotificationItem): boolean {
+  return item.severity === 'error' || item.severity === 'warning' || item.severity === 'action' || item.payload?.actionRequired === true;
+}
+
 function MarkdownDocument({ content }: { content: string }) {
   return (
     <div className="chat-markdown min-w-0 text-sm leading-7 text-text">
@@ -85,6 +89,7 @@ function NotificationDetailModal({ item, onClose }: { item: NotificationItem; on
               <Badge variant="default">{item.source.kind}</Badge>
               {isDelivery ? <Badge variant="accent">Markdown report</Badge> : null}
               {isEvent ? <Badge variant="accent">Cron event</Badge> : null}
+              {isActionRequired(item) ? <Badge variant="warning">Action needed</Badge> : null}
             </div>
             <h2 id="notification-detail-title" className="mt-3 break-words text-lg font-semibold tracking-tight text-text sm:text-2xl">{item.title}</h2>
             <p className="mt-1 text-xs text-text-subtle">{formatDateTime(item.createdAt)}{item.profile ? ` · ${item.profile}` : ''}{item.source.id ? ` · ${item.source.id}` : ''}</p>
@@ -107,16 +112,18 @@ function NotificationDetailModal({ item, onClose }: { item: NotificationItem; on
 
 export function NotificationsRoute() {
   const PAGE_SIZE = 50;
-  const [data, setData] = useState<NotificationList>({ items: [], unreadCount: 0, readCount: 0, allCount: 0, total: 0, hasMore: false, nextOffset: null });
+  const [data, setData] = useState<NotificationList>({ items: [], unreadCount: 0, readCount: 0, allCount: 0, actionableCount: 0, total: 0, hasMore: false, nextOffset: null });
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<NotificationItem | null>(null);
-  const [filter, setFilter] = useState<'all' | 'unread' | 'read'>('all');
+  const [filter, setFilter] = useState<'all' | 'unread' | 'read' | 'actionable'>('all');
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
 
-  const listOptions = filter === 'all' ? { search } : { read: filter, search };
+  const listOptions = filter === 'actionable'
+    ? { search, actionable: true }
+    : filter === 'all' ? { search } : { read: filter, search };
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -128,7 +135,7 @@ export function NotificationsRoute() {
     } finally {
       setLoading(false);
     }
-  }, [listOptions.read, listOptions.search]);
+  }, [listOptions.read, listOptions.search, listOptions.actionable]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -152,7 +159,7 @@ export function NotificationsRoute() {
     } finally {
       setLoadingMore(false);
     }
-  }, [data.hasMore, data.items.length, data.nextOffset, listOptions.read, listOptions.search, loadingMore]);
+  }, [data.hasMore, data.items.length, data.nextOffset, listOptions.read, listOptions.search, listOptions.actionable, loadingMore]);
 
   useEffect(() => {
     if (!selected) return;
@@ -204,7 +211,7 @@ export function NotificationsRoute() {
 
   const visibleItems = data.items;
 
-  const filterLabel = filter === 'all' ? 'all notifications' : filter === 'read' ? 'read notifications' : 'unread notifications';
+  const filterLabel = filter === 'all' ? 'all notifications' : filter === 'read' ? 'read notifications' : filter === 'unread' ? 'unread notifications' : 'actionable notifications';
 
   return (
     <div className="route-page-scroll h-full overflow-y-auto p-4 sm:p-6">
@@ -223,9 +230,9 @@ export function NotificationsRoute() {
 
         <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface-raised p-2 shadow-sm sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-1" role="tablist" aria-label="Notification filter">
-            {(['all', 'unread', 'read'] as const).map((option) => {
-              const count = option === 'all' ? data.allCount : option === 'unread' ? data.unreadCount : data.readCount;
-              const label = option === 'all' ? 'All' : option === 'unread' ? 'Unread' : 'Read';
+            {(['all', 'unread', 'read', 'actionable'] as const).map((option) => {
+              const count = option === 'all' ? data.allCount : option === 'unread' ? data.unreadCount : option === 'read' ? data.readCount : data.actionableCount;
+              const label = option === 'all' ? 'All' : option === 'unread' ? 'Unread' : option === 'read' ? 'Read' : 'Action needed';
               return (
                 <button
                   key={option}
@@ -284,6 +291,7 @@ export function NotificationsRoute() {
                       <Badge variant="default">{item.source.kind}</Badge>
                       {delivery ? <Badge variant="accent">report</Badge> : null}
                       {event ? <Badge variant="accent">event</Badge> : null}
+                      {isActionRequired(item) ? <Badge variant="warning">action needed</Badge> : null}
                     </div>
                     {preview ? <p className={`mt-2 ${delivery ? 'line-clamp-2 font-mono text-[11px] leading-5' : 'line-clamp-2 text-sm'} text-text-muted`}>{preview}</p> : null}
                     <p className="mt-2 text-xs text-text-subtle"><time dateTime={item.createdAt} title={formatDateTime(item.createdAt)}>{formatDateTime(item.createdAt)}</time> <span aria-hidden="true">·</span> {formatRelativeTime(item.createdAt)}{item.profile ? ` · ${item.profile}` : ''}{item.source.id ? ` · ${item.source.id}` : ''} · Tap to open</p>

@@ -20,8 +20,10 @@ from typing import Any, Dict, Optional
 
 try:
     from .policy import choose_event_kind, classify_job, comparable_event_body, load_policy
+    from . import webpush
 except ImportError:  # direct module loading in plugin smoke tests
     from policy import choose_event_kind, classify_job, comparable_event_body, load_policy
+    import webpush
 _DEFAULT_DB = Path.home() / ".hermes" / "mission-control" / "notifications.db"
 _DB_PATH = Path(os.environ.get("MISSION_CONTROL_NOTIFICATIONS_DB", str(_DEFAULT_DB))).expanduser()
 _ALLOWED_SEVERITIES = {"info", "success", "warning", "error", "action"}
@@ -33,6 +35,8 @@ _CRON_WATCH_INTERVAL_SECONDS = 2.0
 _CRON_SYNC_LOCK = threading.Lock()
 _CRON_WATCH_LOCK = threading.Lock()
 _CRON_WATCH_STARTED = False
+_DELIVERY_WORKER_LOCK = threading.Lock()
+_DELIVERY_WORKER_STARTED = False
 _CRON_FINGERPRINT: Optional[tuple[Any, ...]] = None
 _REPORT_NAME_RE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}-\d{2})\.md$")
 _LOG = logging.getLogger(__name__)
@@ -339,6 +343,7 @@ def start_cron_watcher() -> None:
         if _CRON_WATCH_STARTED:
             return
         _CRON_WATCH_STARTED = True
+        start_delivery_worker()
         threading.Thread(
             target=_cron_watcher_loop,
             name="mc-notifications-cron-watcher",
@@ -611,6 +616,18 @@ def _row(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def get_notification(notification_id: str) -> Optional[Dict[str, Any]]:
+    notification_id = str(notification_id or "").strip()
+    if not notification_id:
+        return None
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone()
+        return _row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
 def _delivery_row(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
@@ -811,6 +828,64 @@ def fail_delivery(
     finally:
         conn.close()
 
+def _notification_created_recently(created_at: str, *, window_seconds: int = 300) -> bool:
+    try:
+        created = datetime.fromisoformat(str(created_at)).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return False
+    return abs((datetime.now(timezone.utc) - created).total_seconds()) <= window_seconds
+
+
+def _maybe_queue_webpush(notification_id: str, created_at: str) -> None:
+    if not _notification_created_recently(created_at):
+        return
+    target = webpush.queue_target()
+    if target is None:
+        return
+    try:
+        queue_notification_delivery(notification_id, channel="webpush", target=target)
+    except NotificationValidationError:
+        _LOG.exception("Failed to queue Web Push delivery for %s", notification_id)
+
+
+def _deliver_due_notifications() -> None:
+    for delivery in claim_due_deliveries(limit=20):
+        if delivery["channel"] != "webpush":
+            fail_delivery(delivery["id"], f"Unsupported channel: {delivery['channel']}")
+            continue
+        notification = get_notification(delivery["notificationId"])
+        if notification is None:
+            fail_delivery(delivery["id"], "Notification no longer exists")
+            continue
+        result = webpush.send(notification)
+        if result.get("ok"):
+            complete_delivery(delivery["id"])
+        else:
+            fail_delivery(delivery["id"], str(result.get("error") or "Web Push failed"))
+
+
+def _delivery_worker_loop() -> None:
+    while True:
+        try:
+            _deliver_due_notifications()
+        except Exception:
+            _LOG.exception("Notification delivery worker iteration failed")
+        time.sleep(2.0)
+
+
+def start_delivery_worker() -> None:
+    global _DELIVERY_WORKER_STARTED
+    with _DELIVERY_WORKER_LOCK:
+        if _DELIVERY_WORKER_STARTED:
+            return
+        _DELIVERY_WORKER_STARTED = True
+        threading.Thread(
+            target=_delivery_worker_loop,
+            name="mc-notifications-delivery-worker",
+            daemon=True,
+        ).start()
+
+
 def _require_text(body: Dict[str, Any], key: str, *, max_length: int = _MAX_TEXT) -> str:
     value = str(body.get(key) or "").strip()
     if not value:
@@ -818,6 +893,15 @@ def _require_text(body: Dict[str, Any], key: str, *, max_length: int = _MAX_TEXT
     if len(value) > max_length:
         raise NotificationValidationError(f"{key} is too long")
     return value
+
+
+def _safe_deep_link(value: Any) -> Optional[str]:
+    link = str(value or "").strip()
+    if not link:
+        return None
+    if not link.startswith("/") or link.startswith("//") or any(ord(char) < 32 for char in link):
+        raise NotificationValidationError("deepLink must be an internal path")
+    return link[:500]
 
 
 def publish_notification(body: Dict[str, Any], *, created_at: Optional[str] = None) -> Dict[str, Any]:
@@ -835,7 +919,7 @@ def publish_notification(body: Dict[str, Any], *, created_at: Optional[str] = No
     source_kind = str(source.get("kind") or "system").strip()[:80] or "system"
     source_id = str(source.get("id") or "").strip()[:240] or None
     profile = str(body.get("profile") or "").strip()[:120] or None
-    deep_link = str(body.get("deepLink") or "").strip()[:500] or None
+    deep_link = _safe_deep_link(body.get("deepLink"))
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
     created_at = created_at or _now()
     notification_id = uuid.uuid4().hex
@@ -846,9 +930,10 @@ def publish_notification(body: Dict[str, Any], *, created_at: Optional[str] = No
             "SELECT * FROM notifications WHERE dedupe_key = ?", (dedupe_key,)
         ).fetchone()
         if existing is not None:
-            if notification_type == "cron.delivery" and (
+            changed = notification_type == "cron.delivery" and (
                 existing["body"] != text or existing["title"] != title or existing["severity"] != severity
-            ):
+            )
+            if changed:
                 conn.execute(
                     """
                     UPDATE notifications
@@ -870,6 +955,8 @@ def publish_notification(body: Dict[str, Any], *, created_at: Optional[str] = No
             conn.commit()
             existing = conn.execute("SELECT * FROM notifications WHERE id = ?", (existing["id"],)).fetchone()
             assert existing is not None
+            if changed:
+                _maybe_queue_webpush(existing["id"], created_at)
             return _row(existing)
         conn.execute(
             """
@@ -897,9 +984,20 @@ def publish_notification(body: Dict[str, Any], *, created_at: Optional[str] = No
         conn.commit()
         row = conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone()
         assert row is not None
+        _maybe_queue_webpush(notification_id, created_at)
         return _row(row)
     finally:
         conn.close()
+
+
+def _is_actionable_row(row: sqlite3.Row) -> bool:
+    if row["severity"] in {"error", "warning", "action"}:
+        return True
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    return bool(isinstance(payload, dict) and payload.get("actionRequired") is True)
 
 
 def list_notifications(
@@ -910,6 +1008,7 @@ def list_notifications(
     read_filter: Optional[str] = None,
     search: Optional[str] = None,
     profile: Optional[str] = None,
+    actionable_only: bool = False,
 ) -> Dict[str, Any]:
     _drain_cron_notification_outbox()
     _sync_cron_if_changed()
@@ -921,22 +1020,26 @@ def list_notifications(
         read_filter = "unread"
     if read_filter not in {None, "unread", "read"}:
         raise ValueError("read_filter must be 'unread' or 'read'")
-    clauses = ["archived_at IS NULL"]
+    base_clauses = ["archived_at IS NULL"]
     args: list[Any] = []
     if profile:
-        clauses.append("profile = ?")
+        base_clauses.append("profile = ?")
         args.append(profile)
     needle = str(search or "").strip().lower()
     if needle:
         pattern = f"%{needle}%"
-        clauses.append(
+        base_clauses.append(
             "(LOWER(title) LIKE ? OR LOWER(body) LIKE ? OR LOWER(COALESCE(profile, '')) LIKE ? "
             "OR LOWER(COALESCE(source_kind, '')) LIKE ? OR LOWER(COALESCE(source_id, '')) LIKE ?)"
         )
         args.extend([pattern] * 5)
-    base_where = " AND ".join(clauses)
-    list_clauses = [*clauses]
+    actionable_clause = "(severity IN ('error', 'warning', 'action') OR payload_json LIKE '%\"actionRequired\": true%')"
+    base_where = " AND ".join(base_clauses)
+    list_clauses = [*base_clauses]
     list_args = [*args]
+    if actionable_only:
+        list_clauses.append(actionable_clause)
+    filter_where = " AND ".join(list_clauses)
     if read_filter == "unread":
         list_clauses.append("read_at IS NULL")
     elif read_filter == "read":
@@ -949,15 +1052,19 @@ def list_notifications(
             (*list_args, limit, offset),
         ).fetchall()
         unread_count = conn.execute(
-            f"SELECT COUNT(*) FROM notifications WHERE {base_where} AND read_at IS NULL",
-            args,
+            f"SELECT COUNT(*) FROM notifications WHERE {filter_where} AND read_at IS NULL",
+            list_args,
         ).fetchone()[0]
         read_count = conn.execute(
-            f"SELECT COUNT(*) FROM notifications WHERE {base_where} AND read_at IS NOT NULL",
-            args,
+            f"SELECT COUNT(*) FROM notifications WHERE {filter_where} AND read_at IS NOT NULL",
+            list_args,
         ).fetchone()[0]
         all_count = conn.execute(
-            f"SELECT COUNT(*) FROM notifications WHERE {base_where}",
+            f"SELECT COUNT(*) FROM notifications WHERE {filter_where}",
+            list_args,
+        ).fetchone()[0]
+        actionable_count = conn.execute(
+            f"SELECT COUNT(*) FROM notifications WHERE {base_where} AND {actionable_clause}",
             args,
         ).fetchone()[0]
         total = conn.execute(
@@ -969,6 +1076,7 @@ def list_notifications(
             "unreadCount": int(unread_count),
             "readCount": int(read_count),
             "allCount": int(all_count),
+            "actionableCount": int(actionable_count),
             "total": int(total),
             "hasMore": next_offset < int(total),
             "nextOffset": next_offset if next_offset < int(total) else None,

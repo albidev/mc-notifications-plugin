@@ -21,6 +21,7 @@ export type NotificationList = {
   unreadCount: number;
   readCount: number;
   allCount: number;
+  actionableCount: number;
   total: number;
   hasMore: boolean;
   nextOffset: number | null;

@@ -29,6 +29,7 @@ def listNotifications(body: Dict[str, Any], params: Dict[str, List[str]], auth: 
             raise PluginError(400, "bad_request", "read must be read or unread")
     search = (params.get("q") or [None])[0] or None
     profile = (params.get("profile") or [None])[0] or None
+    actionable_only = (params.get("actionable") or ["0"])[0].lower() in {"1", "true", "yes"}
     try:
         return handlers.list_notifications(
             limit=limit,
@@ -37,12 +38,14 @@ def listNotifications(body: Dict[str, Any], params: Dict[str, List[str]], auth: 
             read_filter=read_filter,
             search=search,
             profile=profile,
+            actionable_only=actionable_only,
         )
     except ValueError as exc:
         raise PluginError(400, "bad_request", str(exc)) from exc
 
 
 def publishNotification(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    handlers.start_cron_watcher()
     try:
         notification = handlers.publish_notification(body)
     except handlers.NotificationValidationError as exc:
