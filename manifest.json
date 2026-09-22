@@ -36,6 +36,36 @@
       "authRequired": true
     },
     {
+      "method": "GET",
+      "path": "/notifications/deliveries",
+      "handler": "listDeliveries",
+      "authRequired": true
+    },
+    {
+      "method": "POST",
+      "path": "/notifications/deliveries/queue",
+      "handler": "queueDelivery",
+      "authRequired": true
+    },
+    {
+      "method": "POST",
+      "path": "/notifications/deliveries/claim",
+      "handler": "claimDeliveries",
+      "authRequired": true
+    },
+    {
+      "method": "POST",
+      "path": "/notifications/deliveries/complete",
+      "handler": "completeDelivery",
+      "authRequired": true
+    },
+    {
+      "method": "POST",
+      "path": "/notifications/deliveries/fail",
+      "handler": "failDelivery",
+      "authRequired": true
+    },
+    {
       "method": "POST",
       "path": "/notifications/read",
       "handler": "markNotificationRead",

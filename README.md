@@ -15,7 +15,8 @@ Persistent notification inbox for Mission Control.
 - paginated inbox loading with server-side search and read/unread filtering;
 - durable cron completion outbox consumer: sanitized events are drained idempotently when available, while the legacy `.md` importer remains as a compatibility path for cron runs that do not emit outbox events;
 - plugin-owned live watcher: after the first inbox request it tracks output-file fingerprints and imports changed cron reports in a daemon worker, without modifying Hermes core;
-- retention pruning with a 90-day default: archived and old read notifications are removed while unread notifications are preserved (`MISSION_CONTROL_NOTIFICATIONS_RETENTION_DAYS=0` disables it).
+- retention pruning with a 90-day default: archived and old read notifications are removed while unread notifications are preserved (`MISSION_CONTROL_NOTIFICATIONS_RETENTION_DAYS=0` disables it);
+- delivery lifecycle with SQLite-backed channel attempts (`pending`, `retrying`, `delivered`, `failed`), atomic claims, exponential backoff, and a configurable maximum attempt count (`MISSION_CONTROL_NOTIFICATIONS_MAX_ATTEMPTS`, default `5`).
 
 ## Installation
 

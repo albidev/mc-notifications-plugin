@@ -25,6 +25,7 @@ except ImportError:  # direct module loading in plugin smoke tests
 _DEFAULT_DB = Path.home() / ".hermes" / "mission-control" / "notifications.db"
 _DB_PATH = Path(os.environ.get("MISSION_CONTROL_NOTIFICATIONS_DB", str(_DEFAULT_DB))).expanduser()
 _ALLOWED_SEVERITIES = {"info", "success", "warning", "error", "action"}
+_ALLOWED_DELIVERY_STATUSES = {"pending", "retrying", "delivered", "failed"}
 _MAX_TEXT = 4000
 _MAX_BODY = 200_000
 _DEFAULT_RETENTION_DAYS = 90
@@ -522,6 +523,30 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(read_at, created_at DESC)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notification_deliveries (
+            id TEXT PRIMARY KEY,
+            notification_id TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            target TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            delivered_at TEXT,
+            next_retry_at TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(notification_id, channel, target)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_deliveries_due ON notification_deliveries(status, next_retry_at, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_deliveries_notification ON notification_deliveries(notification_id)"
+    )
     conn.commit()
     return conn
 
@@ -586,6 +611,206 @@ def _row(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _delivery_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "notificationId": row["notification_id"],
+        "channel": row["channel"],
+        "target": row["target"],
+        "status": row["status"],
+        "attempts": int(row["attempts"]),
+        "deliveredAt": row["delivered_at"],
+        "nextRetryAt": row["next_retry_at"],
+        "error": row["error"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _max_delivery_attempts() -> int:
+    raw = os.environ.get("MISSION_CONTROL_NOTIFICATIONS_MAX_ATTEMPTS")
+    try:
+        return max(1, int(raw)) if raw is not None else 5
+    except (TypeError, ValueError):
+        return 5
+
+
+def _ensure_inbox_delivery(conn: sqlite3.Connection, notification_id: str) -> None:
+    now = _now()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO notification_deliveries
+          (id, notification_id, channel, target, status, attempts, delivered_at, created_at, updated_at)
+        VALUES (?, ?, 'inbox', 'mission-control', 'delivered', 1, ?, ?, ?)
+        """,
+        (uuid.uuid4().hex, notification_id, now, now, now),
+    )
+
+
+def list_notification_deliveries(notification_id: str) -> list[Dict[str, Any]]:
+    notification_id = str(notification_id or "").strip()
+    if not notification_id:
+        raise NotificationValidationError("Missing notification id")
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM notification_deliveries WHERE notification_id = ? ORDER BY created_at ASC, id ASC",
+            (notification_id,),
+        ).fetchall()
+        return [_delivery_row(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def queue_notification_delivery(notification_id: str, *, channel: str, target: str) -> Dict[str, Any]:
+    notification_id = str(notification_id or "").strip()
+    channel = str(channel or "").strip().lower()
+    target = str(target or "").strip()
+    if not notification_id or not channel or not target:
+        raise NotificationValidationError("notification id, channel and target are required")
+    if len(channel) > 80 or len(target) > 240:
+        raise NotificationValidationError("channel or target is too long")
+    conn = _connect()
+    try:
+        if conn.execute("SELECT 1 FROM notifications WHERE id = ?", (notification_id,)).fetchone() is None:
+            raise NotificationValidationError(f"Notification {notification_id} not found")
+        now = _now()
+        delivery_id = uuid.uuid4().hex
+        conn.execute(
+            """
+            INSERT INTO notification_deliveries
+              (id, notification_id, channel, target, status, attempts, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+            ON CONFLICT(notification_id, channel, target) DO UPDATE SET
+              status = CASE WHEN notification_deliveries.status = 'delivered' THEN 'delivered' ELSE 'pending' END,
+              error = NULL,
+              next_retry_at = NULL,
+              updated_at = excluded.updated_at
+            """,
+            (delivery_id, notification_id, channel, target, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM notification_deliveries WHERE notification_id = ? AND channel = ? AND target = ?",
+            (notification_id, channel, target),
+        ).fetchone()
+        assert row is not None
+        return _delivery_row(row)
+    finally:
+        conn.close()
+
+
+def claim_due_deliveries(*, limit: int = 50) -> list[Dict[str, Any]]:
+    limit = max(1, min(int(limit), 100))
+    now = _now()
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """
+            SELECT * FROM notification_deliveries
+            WHERE status IN ('pending', 'retrying')
+              AND attempts < ?
+              AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+            """,
+            (_max_delivery_attempts(), now, limit),
+        ).fetchall()
+        claimed_ids = [row["id"] for row in rows]
+        for delivery_id in claimed_ids:
+            conn.execute(
+                """
+                UPDATE notification_deliveries
+                SET status = 'retrying', attempts = attempts + 1,
+                    updated_at = ?, error = NULL
+                WHERE id = ?
+                """,
+                (now, delivery_id),
+            )
+        conn.commit()
+        if not claimed_ids:
+            return []
+        placeholders = ",".join("?" for _ in claimed_ids)
+        claimed = conn.execute(
+            f"SELECT * FROM notification_deliveries WHERE id IN ({placeholders}) ORDER BY created_at ASC, id ASC",
+            claimed_ids,
+        ).fetchall()
+        return [_delivery_row(row) for row in claimed]
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def complete_delivery(delivery_id: str) -> Dict[str, Any]:
+    delivery_id = str(delivery_id or "").strip()
+    if not delivery_id:
+        raise NotificationValidationError("Missing delivery id")
+    conn = _connect()
+    try:
+        now = _now()
+        cursor = conn.execute(
+            """
+            UPDATE notification_deliveries
+            SET status = 'delivered', delivered_at = ?, next_retry_at = NULL,
+                error = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, delivery_id),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise NotificationValidationError(f"Delivery {delivery_id} not found")
+        row = conn.execute("SELECT * FROM notification_deliveries WHERE id = ?", (delivery_id,)).fetchone()
+        assert row is not None
+        return _delivery_row(row)
+    finally:
+        conn.close()
+
+
+def fail_delivery(
+    delivery_id: str,
+    error: str,
+    *,
+    retry_after_seconds: Optional[int] = None,
+) -> Dict[str, Any]:
+    delivery_id = str(delivery_id or "").strip()
+    error = str(error or "").strip()[:2000]
+    if not delivery_id or not error:
+        raise NotificationValidationError("delivery id and error are required")
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM notification_deliveries WHERE id = ?", (delivery_id,)).fetchone()
+        if row is None:
+            raise NotificationValidationError(f"Delivery {delivery_id} not found")
+        attempts = int(row["attempts"])
+        now = _now()
+        if attempts >= _max_delivery_attempts():
+            status, next_retry = "failed", None
+        else:
+            delay = retry_after_seconds
+            if delay is None:
+                delay = min(3600, 30 * (2 ** max(attempts - 1, 0)))
+            delay = max(0, int(delay))
+            status = "retrying"
+            next_retry = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+        conn.execute(
+            """
+            UPDATE notification_deliveries
+            SET status = ?, error = ?, next_retry_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, error, next_retry, now, delivery_id),
+        )
+        conn.commit()
+        result = conn.execute("SELECT * FROM notification_deliveries WHERE id = ?", (delivery_id,)).fetchone()
+        assert result is not None
+        return _delivery_row(result)
+    finally:
+        conn.close()
+
 def _require_text(body: Dict[str, Any], key: str, *, max_length: int = _MAX_TEXT) -> str:
     value = str(body.get(key) or "").strip()
     if not value:
@@ -641,8 +866,10 @@ def publish_notification(body: Dict[str, Any], *, created_at: Optional[str] = No
                         existing["id"],
                     ),
                 )
-                conn.commit()
-                existing = conn.execute("SELECT * FROM notifications WHERE id = ?", (existing["id"],)).fetchone()
+            _ensure_inbox_delivery(conn, existing["id"])
+            conn.commit()
+            existing = conn.execute("SELECT * FROM notifications WHERE id = ?", (existing["id"],)).fetchone()
+            assert existing is not None
             return _row(existing)
         conn.execute(
             """
@@ -666,6 +893,7 @@ def publish_notification(body: Dict[str, Any], *, created_at: Optional[str] = No
                 json.dumps(payload, ensure_ascii=False),
             ),
         )
+        _ensure_inbox_delivery(conn, notification_id)
         conn.commit()
         row = conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone()
         assert row is not None

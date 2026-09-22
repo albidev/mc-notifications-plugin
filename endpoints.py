@@ -50,6 +50,62 @@ def publishNotification(body: Dict[str, Any], params: Dict[str, List[str]], auth
     return {"success": True, "notification": notification}
 
 
+def listDeliveries(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    notification_id = (params.get("notificationId") or params.get("notification_id") or [None])[0]
+    if not notification_id:
+        raise PluginError(400, "bad_request", "notificationId is required")
+    try:
+        return {"deliveries": handlers.list_notification_deliveries(notification_id)}
+    except handlers.NotificationValidationError as exc:
+        raise PluginError(400, "bad_request", str(exc)) from exc
+
+
+def queueDelivery(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    try:
+        delivery = handlers.queue_notification_delivery(
+            str(body.get("notificationId") or body.get("notification_id") or ""),
+            channel=str(body.get("channel") or ""),
+            target=str(body.get("target") or ""),
+        )
+    except handlers.NotificationValidationError as exc:
+        raise PluginError(400, "bad_request", str(exc)) from exc
+    return {"success": True, "delivery": delivery}
+
+
+def claimDeliveries(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    try:
+        limit = min(max(int(body.get("limit") or 50), 1), 100)
+        deliveries = handlers.claim_due_deliveries(limit=limit)
+    except (TypeError, ValueError) as exc:
+        raise PluginError(400, "bad_request", "limit must be an integer") from exc
+    return {"success": True, "deliveries": deliveries}
+
+
+def completeDelivery(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    try:
+        delivery = handlers.complete_delivery(str(body.get("id") or body.get("deliveryId") or ""))
+    except handlers.NotificationValidationError as exc:
+        raise PluginError(400, "bad_request", str(exc)) from exc
+    return {"success": True, "delivery": delivery}
+
+
+def failDelivery(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    try:
+        retry_after = body.get("retryAfterSeconds")
+        if retry_after is not None:
+            retry_after = int(retry_after)
+        delivery = handlers.fail_delivery(
+            str(body.get("id") or body.get("deliveryId") or ""),
+            str(body.get("error") or ""),
+            retry_after_seconds=retry_after,
+        )
+    except handlers.NotificationValidationError as exc:
+        raise PluginError(400, "bad_request", str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise PluginError(400, "bad_request", "retryAfterSeconds must be an integer") from exc
+    return {"success": True, "delivery": delivery}
+
+
 def markNotificationRead(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
     notification_id = str(body.get("id") or "").strip()
     if not notification_id:
