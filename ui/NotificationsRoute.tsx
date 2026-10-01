@@ -215,7 +215,7 @@ export function NotificationsRoute() {
 
   return (
     <div className="route-page-scroll h-full overflow-y-auto p-4 sm:p-6">
-      <div className="mx-auto flex max-w-4xl flex-col gap-4">
+      <div className="mx-auto flex w-full max-w-none flex-col gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <span className="eyebrow">Inbox</span>
