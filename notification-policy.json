@@ -16,10 +16,10 @@
 
     "state-db-integrity-check": {"mode": "event", "on": ["failed", "recovered"]},
     "bdh-brain-promote": {"mode": "event", "on": ["failed", "changed"]},
-    "bdh-okf-live-watchdog": {"mode": "event", "on": ["failed", "recovered"]},
+    "bdh-health-watchdog": {"mode": "event", "on": ["failed", "recovered"]},
     "bdh-recovery-watchdog": {"mode": "event", "on": ["failed", "recovered"]},
     "omlx-watchdog": {"mode": "event", "on": ["failed", "recovered"]},
-    "BDH session synthesis workstream monitor": {"mode": "event", "on": ["failed", "changed"]},
+
     "vault-sync": {"mode": "event", "on": ["failed", "changed"]}
   }
 }
