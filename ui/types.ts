@@ -26,3 +26,7 @@ export type NotificationList = {
   hasMore: boolean;
   nextOffset: number | null;
 };
+
+export type NotificationSession =
+  | { available: true; sessionId: string; profile: string; title: string | null; messageCount: number }
+  | { available: false; reason: string };

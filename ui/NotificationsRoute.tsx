@@ -1,13 +1,13 @@
-import { Bell, Check, CheckCheck, ExternalLink, RefreshCw, Search, X } from 'lucide-react';
+import { Bell, Check, CheckCheck, ExternalLink, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { useCallback, useEffect, useState, type CSSProperties } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Badge, Button, Card } from './primitives';
 import { formatDateTime, formatRelativeTime } from './format';
-import { listNotifications, markAllNotificationsRead, markNotificationRead } from './endpoints';
-import type { NotificationItem, NotificationList, NotificationSeverity } from './types';
+import { getNotificationSession, listNotifications, markAllNotificationsRead, markNotificationRead } from './endpoints';
+import type { NotificationItem, NotificationList, NotificationSession, NotificationSeverity } from './types';
 
 const severityVariant: Record<NotificationSeverity, 'default' | 'positive' | 'warning' | 'negative' | 'accent'> = {
   info: 'accent',
@@ -27,6 +27,30 @@ function isCronEvent(item: NotificationItem): boolean {
 
 function isActionRequired(item: NotificationItem): boolean {
   return item.severity === 'error' || item.severity === 'warning' || item.severity === 'action' || item.payload?.actionRequired === true;
+}
+
+/** Host chat contract (same params as the MC session picker): resume an exact session in its own profile. */
+function chatSessionSearch(search: string, sessionId: string, profile: string): string {
+  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  for (const key of ['chatSession', 'botProfile', 'chatMode', 'roomId']) params.delete(key);
+  params.set('chatSession', sessionId);
+  params.set('botProfile', profile.trim() || 'default');
+  params.set('chatMode', 'canonical');
+  return params.toString();
+}
+
+function useCronSession(item: NotificationItem): NotificationSession | null {
+  const [session, setSession] = useState<NotificationSession | null>(null);
+  useEffect(() => {
+    setSession(null);
+    if (item.source.kind !== 'cron') return;
+    let cancelled = false;
+    getNotificationSession(item.id)
+      .then((result) => { if (!cancelled) setSession(result); })
+      .catch(() => { if (!cancelled) setSession({ available: false, reason: 'lookup_failed' }); });
+    return () => { cancelled = true; };
+  }, [item.id, item.source.kind]);
+  return session;
 }
 
 function MarkdownDocument({ content }: { content: string }) {
@@ -54,7 +78,20 @@ function MarkdownDocument({ content }: { content: string }) {
 function NotificationDetailModal({ item, onClose }: { item: NotificationItem; onClose: () => void }) {
   const isDelivery = isCronDelivery(item);
   const isEvent = isCronEvent(item);
+  const cronSession = useCronSession(item);
+  const navigate = useNavigate();
+  const location = useLocation();
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 640);
+
+  const openChat = () => {
+    if (!cronSession?.available) return;
+    const search = chatSessionSearch(location.search, cronSession.sessionId, cronSession.profile);
+    onClose();
+    navigate(`${location.pathname}?${search}`, {
+      replace: true,
+      state: { sessionResumeRequest: `notification:${item.id}:${Date.now()}` },
+    });
+  };
 
   useEffect(() => {
     const onResize = () => setIsMobile(window.innerWidth < 640);
@@ -103,7 +140,20 @@ function NotificationDetailModal({ item, onClose }: { item: NotificationItem; on
         </div>
         <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border-subtle bg-surface-raised px-4 py-3 sm:px-6">
           <span className="truncate text-[11px] text-text-subtle">{isDelivery ? 'Cron report' : isEvent ? 'Cron event' : 'Mission Control notification'}</span>
-          <Button variant="secondary" onClick={onClose}>Close</Button>
+          <div className="flex shrink-0 items-center gap-2">
+            {cronSession?.available ? (
+              <Button
+                variant="primary"
+                icon={<MessageSquare className="h-3.5 w-3.5" />}
+                onClick={openChat}
+                title={`Continue this run as a chat${cronSession.title ? ` (${cronSession.title})` : ''}`}
+                data-cron-session-id={cronSession.sessionId}
+              >
+                Open chat
+              </Button>
+            ) : null}
+            <Button variant="secondary" onClick={onClose}>Close</Button>
+          </div>
         </footer>
       </section>
     </div>

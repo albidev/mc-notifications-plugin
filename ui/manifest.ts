@@ -25,6 +25,7 @@ export const notificationsManifest: MCPluginManifest = {
   endpoints: [
     { method: 'GET', path: '/notifications', handler: 'listNotifications' },
     { method: 'GET', path: '/notifications/status', handler: 'notificationStatus' },
+    { method: 'GET', path: '/notifications/session', handler: 'notificationSession' },
     { method: 'POST', path: '/notifications/publish', handler: 'publishNotification' },
     { method: 'POST', path: '/notifications/read', handler: 'markNotificationRead' },
     { method: 'POST', path: '/notifications/read-all', handler: 'markAllNotificationsRead' },

@@ -628,6 +628,96 @@ def get_notification(notification_id: str) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+_SESSION_MATCH_WINDOW_SECONDS = 600
+
+
+def _profile_state_db(profile: Optional[str]) -> Path:
+    root = _hermes_root()
+    name = str(profile or "").strip()
+    if not name or name == "default":
+        return root / "state.db"
+    return root / "profiles" / name / "state.db"
+
+
+def _notification_report_time(notification: Dict[str, Any]) -> Optional[datetime]:
+    output_file = (notification.get("payload") or {}).get("outputFile")
+    if output_file and _REPORT_NAME_RE.match(Path(str(output_file)).name):
+        return _parse_report_time(Path(str(output_file)))
+    try:
+        return datetime.fromisoformat(str(notification.get("createdAt"))).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_cron_session(notification_id: str) -> Dict[str, Any]:
+    """Map a cron notification to the agent session of the run that produced it.
+
+    Agent-based cron runs persist a real Hermes session (``cron_<job>_<start>``
+    for scheduled runs, ``local-…`` titled ``<job name> · <time>`` for manual
+    runs). Script-only jobs never create one, so they resolve to unavailable.
+    Read-only: the plugin never writes Hermes SessionDB.
+    """
+    notification = get_notification(notification_id)
+    if notification is None:
+        return {"available": False, "reason": "not_found"}
+    source = notification.get("source") or {}
+    if source.get("kind") != "cron" or not source.get("id"):
+        return {"available": False, "reason": "not_cron"}
+    job_id = str(source["id"])
+    profile = str(notification.get("profile") or "default")
+    job_name = str((notification.get("payload") or {}).get("jobName") or "").strip()
+    report_time = _notification_report_time(notification)
+    if report_time is None:
+        return {"available": False, "reason": "no_run_time"}
+    db_path = _profile_state_db(profile)
+    if not db_path.exists():
+        return {"available": False, "reason": "no_session_db"}
+    report_ts = report_time.timestamp()
+    id_prefix = f"cron_{job_id}_"
+    title_prefix = f"{job_name} · " if job_name else None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, title, started_at, ended_at, message_count
+                FROM sessions
+                WHERE source = 'cron'
+                  AND (substr(id, 1, length(?)) = ?
+                       OR (? IS NOT NULL AND substr(title, 1, length(?)) = ?))
+                  AND started_at <= ?
+                  AND started_at >= ?
+                ORDER BY ABS(COALESCE(ended_at, started_at) - ?) ASC
+                LIMIT 1
+                """,
+                (
+                    id_prefix, id_prefix,
+                    title_prefix, title_prefix or "", title_prefix or "",
+                    report_ts + 60,
+                    report_ts - 6 * 3600,
+                    report_ts,
+                ),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        _LOG.warning("cron session lookup failed for %s: %s", notification_id, exc)
+        return {"available": False, "reason": "lookup_failed"}
+    if not rows:
+        return {"available": False, "reason": "no_agent_session"}
+    session_id, title, started_at, ended_at, message_count = rows[0]
+    anchor = ended_at if ended_at is not None else started_at
+    if abs(float(anchor) - report_ts) > _SESSION_MATCH_WINDOW_SECONDS:
+        return {"available": False, "reason": "no_agent_session"}
+    return {
+        "available": True,
+        "sessionId": session_id,
+        "profile": profile,
+        "title": title,
+        "messageCount": int(message_count or 0),
+    }
+
+
 def _delivery_row(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],

@@ -114,6 +114,13 @@ def failDelivery(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any =
     return {"success": True, "delivery": delivery}
 
 
+def notificationSession(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
+    notification_id = str((params.get("id") or [""])[0] or "").strip()
+    if not notification_id:
+        raise PluginError(400, "bad_request", "id is required")
+    return handlers.resolve_cron_session(notification_id)
+
+
 def markNotificationRead(body: Dict[str, Any], params: Dict[str, List[str]], auth: Any = None) -> Dict[str, Any]:
     notification_id = str(body.get("id") or "").strip()
     if not notification_id:

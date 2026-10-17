@@ -1,4 +1,4 @@
-import type { NotificationItem, NotificationList } from './types';
+import type { NotificationItem, NotificationList, NotificationSession } from './types';
 
 const API_BASE = '/api/local';
 
@@ -24,12 +24,17 @@ export type NotificationListOptions = {
   actionable?: boolean;
 };
 
-export function listNotifications(limit = 50, offset = 0, options: NotificationListOptions = {}): Promise<NotificationList> {
+export function listNotifications(
+  limit = 50,
+  offset = 0,
+  options: NotificationListOptions = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<NotificationList> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (options.read) params.set('read', options.read);
   if (options.search?.trim()) params.set('q', options.search.trim());
   if (options.actionable) params.set('actionable', '1');
-  return request<NotificationList>(`/notifications?${params.toString()}`);
+  return request<NotificationList>(`/notifications?${params.toString()}`, { signal: init.signal });
 }
 
 export function markNotificationRead(id: string): Promise<{ success: boolean; notification: NotificationItem }> {
@@ -44,4 +49,8 @@ export function markAllNotificationsRead(): Promise<{ success: boolean; markedRe
     method: 'POST',
     body: JSON.stringify({}),
   });
+}
+
+export function getNotificationSession(id: string): Promise<NotificationSession> {
+  return request<NotificationSession>(`/notifications/session?${new URLSearchParams({ id }).toString()}`);
 }

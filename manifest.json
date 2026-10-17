@@ -41,6 +41,12 @@
       "authRequired": true
     },
     {
+      "method": "GET",
+      "path": "/notifications/session",
+      "handler": "notificationSession",
+      "authRequired": true
+    },
+    {
       "method": "POST",
       "path": "/notifications/publish",
       "handler": "publishNotification",

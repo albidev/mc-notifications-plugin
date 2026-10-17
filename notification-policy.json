@@ -13,6 +13,7 @@
     "bdh-hebbian-eval-verdict": {"mode": "report", "on": ["completed", "failed"]},
     "curate-ask-ai": {"mode": "report", "on": ["completed", "failed"]},
     "curate-nightly-verify": {"mode": "report", "on": ["completed", "failed"]},
+    "ops-daily-note": {"mode": "report", "on": ["completed", "failed"]},
 
     "state-db-integrity-check": {"mode": "event", "on": ["failed", "recovered"]},
     "bdh-brain-promote": {"mode": "event", "on": ["failed", "changed"]},
