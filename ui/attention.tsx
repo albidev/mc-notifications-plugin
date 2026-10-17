@@ -1,27 +1,35 @@
 import { Bell, ChevronRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Badge } from './primitives';
 import { listNotifications } from './endpoints';
+import { createSingleFlightPoller } from './single-flight-poller';
 
 export function NotificationsAttention({ onActiveChange }: { onActiveChange: (count: number) => void }) {
   const [count, setCount] = useState(0);
-  const refresh = useCallback(async () => {
-    try {
-      const result = await listNotifications(1, 0, { actionable: true });
-      setCount(result.unreadCount);
-      onActiveChange(result.unreadCount);
-    } catch {
-      setCount(0);
-      onActiveChange(0);
-    }
+  // Hosts may pass a fresh callback every render; keep it out of the polling
+  // effect so a re-render never restarts the poll (and never adds a request).
+  const onActiveChangeRef = useRef(onActiveChange);
+  useEffect(() => {
+    onActiveChangeRef.current = onActiveChange;
   }, [onActiveChange]);
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 30_000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+    const poller = createSingleFlightPoller({
+      intervalMs: 30_000,
+      load: (signal) => listNotifications(1, 0, { actionable: true }, { signal }),
+      onResult: (result) => {
+        setCount(result.unreadCount);
+        onActiveChangeRef.current(result.unreadCount);
+      },
+      onError: () => {
+        setCount(0);
+        onActiveChangeRef.current(0);
+      },
+    });
+    poller.start();
+    return () => poller.stop();
+  }, []);
 
   if (count === 0) return null;
   return (

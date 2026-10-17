@@ -1,9 +1,10 @@
 import { Bell, CheckCheck, ChevronRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Badge, Card } from './primitives';
 import { formatDateTime, formatRelativeTime } from './format';
 import { listNotifications } from './endpoints';
+import { createSingleFlightPoller } from './single-flight-poller';
 import type { NotificationItem, NotificationSeverity } from './types';
 
 const severityClass: Record<NotificationSeverity, string> = {
@@ -18,21 +19,19 @@ export function NotificationsOverview() {
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
 
-  const refresh = useCallback(async () => {
-    try {
-      const result = await listNotifications(3);
-      setItems(result.items);
-      setUnreadCount(result.unreadCount);
-    } catch {
-      // The overview must stay usable if an optional plugin backend is down.
-    }
-  }, []);
-
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 30_000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+    const poller = createSingleFlightPoller({
+      intervalMs: 30_000,
+      load: (signal) => listNotifications(3, 0, {}, { signal }),
+      onResult: (result) => {
+        setItems(result.items);
+        setUnreadCount(result.unreadCount);
+      },
+      // The overview must stay usable if an optional plugin backend is down.
+    });
+    poller.start();
+    return () => poller.stop();
+  }, []);
 
   return (
     <Card padding="none">
